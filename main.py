@@ -1,44 +1,66 @@
 import os
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-from groq import Groq
-from tavily import TavilyClient
+import telebot
+import google.generativeai as genai
+from duckduckgo_search import DDGS
 
-# Инициализация клиентов через переменные окружения
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+# Получаем ключи из настроек сервера
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привет! Я твой ИИ-ассистент с выходом в интернет. Задай мне любой вопрос!")
+# Проверка ключей
+if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
+    print("Ошибка: Не найдены ключи TELEGRAM_TOKEN или GEMINI_API_KEY!")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_text = update.message.text
-    await update.message.reply_chat_action("typing")
+# Настраиваем Gemini
+genai.configure(api_key=GEMINI_API_KEY)
+# Используем быструю и бесплатную модель
+model = genai.GenerativeModel('gemini-1.5-flash')
 
+# Запускаем бота
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    bot.reply_to(message, "Привет! Я твой ИИ-бот с возможностью поиска в интернете. Задай мне любой вопрос!")
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    user_text = message.text
+    
+    # Отправляем сообщение пользователю, что думаем
+    sent_msg = bot.reply_to(message, "Ищу информацию в сети...")
+    
     try:
-        # 1. Поиск в интернете через Tavily
-        search_res = tavily_client.search(query=user_text, search_depth="basic")
-        context_data = "\n".join([f"- {r['content']}" for r in search_res.get("results", [])])
-
-        # 2. Формирование ответа через Groq (Llama 3)
-        prompt = f"Данные из интернета:\n{context_data}\n\nВопрос пользователя: {user_text}"
+        # Ищем свежие данные в DuckDuckGo
+        search_results = ""
+        with DDGS() as ddgs:
+            results = [r['body'] for r in ddgs.text(user_text, max_results=3)]
+            search_results = "\n".join(results)
+            
+        # Формируем запрос для ИИ с учетом найденного в интернете
+        prompt = f"""
+        Пользователь спросил: {user_text}
         
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "Ты умный помощник. Отвечай красиво, структурированно, с эмодзи и на языке пользователя, используя полученный контекст из интернета."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        answer = response.choices[0].message.content
-        await update.message.reply_text(answer, parse_mode="Markdown")
-
+        Вот свежая информация из интернета по этому вопросу:
+        {search_results}
+        
+        Используй эту информацию и свои знания, чтобы дать точный, понятный и полезный ответ на языке пользователя.
+        """
+        
+        response = model.generate_content(prompt)
+        ai_answer = response.text
+        
+        bot.edit_message_text(ai_answer, chat_id=message.chat.id, message_id=sent_msg.message_id)
+        
     except Exception as e:
-        await update.message.reply_text("Произошла ошибка при обработке запроса. Попробуйте позже.")
+        # Если поиск не сработал, отвечаем просто через ИИ
+        try:
+            response = model.generate_content(user_text)
+            bot.edit_message_text(response.text, chat_id=message.chat.id, message_id=sent_msg.message_id)
+        except Exception as err:
+            bot.edit_message_text("Произошла ошибка при обработке запроса.", chat_id=message.chat.id, message_id=sent_msg.message_id)
 
+# Бесконечный опрос серверов Telegram
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
-      
+    print("Бот запущен...")
+    bot.infinity_polling()
