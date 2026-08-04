@@ -1,6 +1,7 @@
 import os
 import sys
 import telebot
+from telebot import apihelper
 from flask import Flask
 from threading import Thread
 import logging
@@ -14,7 +15,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MESSAGE_LIMIT = 4096
-
 
 # ========== Импорт Google GenAI с fallback ==========
 try:
@@ -32,7 +32,6 @@ except ImportError:
         sys.exit(1)
 # =====================================================
 
-
 class Config:
     """Класс для конфигурации и проверки переменных окружения."""
     def __init__(self):
@@ -49,17 +48,16 @@ class Config:
             return False
         return True
 
-
 class AIService:
     """Класс для работы с Gemini API."""
     def __init__(self, api_key: str):
         if GENAI_SDK == 'new':
             self.client = genai.Client(api_key=api_key)
             self.model_name = 'gemini-2.5-flash'
-        else:  # legacy
+        else:  
             genai.configure(api_key=api_key)
-            self.client = None  # для совместимости, но не используется
-            self.model_name = 'gemini-2.5-flash'  # в старом SDK модель задаётся иначе
+            self.client = None  
+            self.model_name = 'gemini-2.5-flash'  
 
     def generate_response(self, prompt: str) -> str:
         logger.info("Отправка запроса к модели Gemini...")
@@ -72,13 +70,11 @@ class AIService:
                 return response.text
             return "Извините, модель не вернула текстовый ответ."
         else:
-            # Старый SDK (google-generativeai)
             model = genai.GenerativeModel(self.model_name)
             response = model.generate_content(prompt)
             if response and response.text:
                 return response.text
             return "Извините, модель не вернула текстовый ответ."
-
 
 class TelegramBotManager:
     """Класс для управления логикой Telegram бота."""
@@ -101,7 +97,6 @@ class TelegramBotManager:
             user_id = message.from_user.id
             user_text = message.text
 
-            # Проверка на пустое сообщение
             if not user_text or not user_text.strip():
                 self.bot.reply_to(message, "Пожалуйста, напишите текст запроса.")
                 return
@@ -123,17 +118,33 @@ class TelegramBotManager:
         """Разбивает длинные сообщения на части и отправляет их."""
         for i in range(0, len(text), TELEGRAM_MESSAGE_LIMIT):
             chunk = text[i:i + TELEGRAM_MESSAGE_LIMIT]
-            # Отвечаем на сообщение только первой частью, остальное шлем вдогонку
             if i == 0 and reply_to is not None:
                 self.bot.send_message(chat_id, chunk, reply_to_message_id=reply_to)
             else:
                 self.bot.send_message(chat_id, chunk)
 
     def start_polling(self):
-        logger.info("Запуск infinity_polling...")
-        # infinity_polling сам обрабатывает переподключение
-        self.bot.infinity_polling(long_polling_timeout=60)
+        logger.info("Очистка старых вебхуков и подключений...")
+        try:
+            self.bot.remove_webhook()
+        except Exception:
+            pass
 
+        logger.info("Запуск защищенного infinity_polling...")
+        while True:
+            try:
+                # skip_pending=True предотвращает ответы на старые сообщения из-за крашей
+                self.bot.infinity_polling(skip_pending=True, long_polling_timeout=60)
+            except apihelper.ApiTelegramException as e:
+                if e.error_code == 409:
+                    logger.warning("Конфликт 409: Обнаружена другая копия бота. Ждем 15 секунд...")
+                    time.sleep(15)
+                else:
+                    logger.error(f"Ошибка API Telegram: {e}")
+                    time.sleep(5)
+            except Exception as e:
+                logger.error(f"Сбой в работе бота: {e}. Перезапуск через 5 секунд...")
+                time.sleep(5)
 
 class WebServer:
     """Класс для создания Flask-сервера-заглушки (нужен для Render)."""
@@ -153,12 +164,10 @@ class WebServer:
 
     def run(self):
         logger.info(f"Запуск веб-сервера Flask на порту {self.port}...")
-        # Подавление баннера запуска Flask
         cli = sys.modules.get('flask.cli')
         if cli:
             cli.show_server_banner = lambda *args, **kwargs: None
         self.app.run(host="0.0.0.0", port=self.port, debug=False, use_reloader=False)
-
 
 def main():
     logger.info("Инициализация запуска приложения...")
@@ -177,7 +186,6 @@ def main():
 
     bot_manager.start_polling()
 
-
 if __name__ == "__main__":
     main()
-        
+    
